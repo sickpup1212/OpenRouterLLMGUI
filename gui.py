@@ -871,7 +871,7 @@ class DesktopUtilitiesApp:
             ("Structured Outputs", "structured_outputs", "", "entry"),
             ("Stop Sequences", "stop", "", "entry"),
             ("Reasoning", "reasoning", "", "entry"),
-            ("Verbosity", "verbosity", 0, "spinbox_int"),
+            ("Verbosity", "verbosity", ["low", "medium", "high"], "combobox"),
         ]
 
         self.profile_entries = {}
@@ -899,6 +899,9 @@ class DesktopUtilitiesApp:
                 elif widget_type == "spinbox_int":
                     widget = ttk.Spinbox(editor_frame, from_=0, to=8192, width=10)
                     widget.set(default)
+                elif widget_type == "combobox":
+                    widget = ttk.Combobox(editor_frame, values=default, state="readonly")
+                    widget.set(default[1]) # Default to 'medium'
 
                 # `widget` is guaranteed to be defined here for the else branch
                 widget.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
@@ -1120,7 +1123,7 @@ class DesktopUtilitiesApp:
                 tool_to_update['function']['description'] = description
                 tool_to_update['function']['parameters'] = params
             else:
-                return # User cancelled overwrite
+                return  # User cancelled overwrite
         else:
             # Add new tool
             new_tool = {
@@ -1195,11 +1198,16 @@ class DesktopUtilitiesApp:
                 widget.set(bool(value))
             elif isinstance(widget, Text):
                 widget.delete("1.0", tk.END)
-                widget.insert("1.0", str(value))
+                if key == 'tools' and isinstance(value, list):
+                    widget.insert("1.0", json.dumps(value, indent=4))
+                else:
+                    widget.insert("1.0", str(value))
             elif isinstance(widget, ttk.Entry):
                 widget.delete(0, tk.END)
                 widget.insert(0, str(value))
-            else: # Spinbox
+            elif isinstance(widget, ttk.Combobox):
+                widget.set(str(value))
+            elif isinstance(widget, ttk.Spinbox):
                 widget.set(str(value) if value else "0")
 
     def create_saved_items_tab(self, parent):
