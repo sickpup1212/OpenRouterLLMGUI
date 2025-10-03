@@ -522,6 +522,90 @@ class UseFileWindow(Toplevel):
         self.destroy()
 
 
+class SelectToolsWindow(Toplevel):
+    """Window to select tools for an LLM profile."""
+    def __init__(self, parent_app, tools_text_widget):
+        super().__init__(parent_app.root)
+        self.title("Select Tools")
+        self.transient(parent_app.root)
+        self.geometry("400x500")
+        self.app = parent_app
+        self.tools_text_widget = tools_text_widget
+        self.tool_vars = []
+
+        self.create_widgets()
+        self.load_current_tools()
+
+    def create_widgets(self):
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="Select tools to include in the profile:").pack(anchor="w", pady=(0, 10))
+
+        # Scrollable frame for checkboxes
+        canvas_frame = ttk.Frame(main_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(canvas_frame)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        for tool in self.app.tools:
+            var = tk.BooleanVar()
+            tool_name = tool.get('function', {}).get('name', 'Unnamed Tool')
+            chk = ttk.Checkbutton(self.scrollable_frame, text=tool_name, variable=var)
+            chk.pack(anchor="w", padx=10, pady=5)
+            self.tool_vars.append((var, tool))
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Button(button_frame, text="Apply", command=self.apply_selection).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+
+    def load_current_tools(self):
+        try:
+            current_tools_str = self.tools_text_widget.get("1.0", tk.END).strip()
+            if not current_tools_str:
+                return
+            current_tools_data = json.loads(current_tools_str)
+            if not isinstance(current_tools_data, list):
+                return
+            current_tool_names = {t.get('function', {}).get('name') for t in current_tools_data}
+
+            for var, tool in self.tool_vars:
+                tool_name = tool.get('function', {}).get('name')
+                if tool_name in current_tool_names:
+                    var.set(True)
+        except (json.JSONDecodeError, AttributeError):
+            pass # Ignore errors in parsing existing content
+
+    def apply_selection(self):
+        selected_tools = []
+        for var, tool in self.tool_vars:
+            if var.get():
+                selected_tools.append(tool)
+
+        self.tools_text_widget.delete("1.0", tk.END)
+        if selected_tools:
+            # Pretty-print JSON into the Text widget
+            self.tools_text_widget.insert("1.0", json.dumps(selected_tools, indent=4))
+
+        self.destroy()
+
+
 class DesktopUtilitiesApp:
     CONFIG_FILE = "config.json"
     FILES_DIR = "saved_files"
@@ -536,6 +620,7 @@ class DesktopUtilitiesApp:
         self.llm_profiles = {}
         self.saved_items = []
         self.files = []
+        self.tools = []
         self.open_query_windows = {}
         self.openrouter_models = []
         self.models_data = []
@@ -569,6 +654,7 @@ class DesktopUtilitiesApp:
                     self.llm_profiles = data.get("llm_profiles", {})
                     self.saved_items = data.get("saved_items", [])
                     self.files = data.get("files", [])
+                    self.tools = data.get("tools", [])
             except json.JSONDecodeError:
                 messagebox.showerror("Config Error", "Failed to load config.json. It might be corrupted.")
 
@@ -582,7 +668,8 @@ class DesktopUtilitiesApp:
             "llm_configs": self.llm_configs,
             "llm_profiles": self.llm_profiles,
             "saved_items": self.saved_items,
-            "files": self.files
+            "files": self.files,
+            "tools": self.tools
         }
         with open(self.CONFIG_FILE, 'w') as f:
             json.dump(data, f, indent=4)
@@ -598,18 +685,21 @@ class DesktopUtilitiesApp:
         shortcut_tab = ttk.Frame(notebook)
         llm_tab = ttk.Frame(notebook)
         profiles_tab = ttk.Frame(notebook)
+        tools_tab = ttk.Frame(notebook)
         saved_items_tab = ttk.Frame(notebook)
         files_tab = ttk.Frame(notebook)
 
         notebook.add(shortcut_tab, text='Text Shortcuts')
         notebook.add(llm_tab, text='LLM Models')
         notebook.add(profiles_tab, text='LLM Profiles')
+        notebook.add(tools_tab, text='Tools')
         notebook.add(saved_items_tab, text='Saved Items')
         notebook.add(files_tab, text='Files')
 
         self.create_shortcut_tab(shortcut_tab)
         self.create_llm_tab(llm_tab)
         self.create_config_profiles_tab(profiles_tab)
+        self.create_tools_tab(tools_tab)
         self.create_saved_items_tab(saved_items_tab)
         self.create_files_tab(files_tab)
 
@@ -789,18 +879,30 @@ class DesktopUtilitiesApp:
         for label, key, default, widget_type in fields:
             ttk.Label(editor_frame, text=f"{label}:").grid(row=row_counter, column=0, padx=5, pady=2, sticky="w")
 
-            if widget_type == "text":
-                widget = Text(editor_frame, height=3, width=30)
-            elif widget_type == "entry":
-                widget = ttk.Entry(editor_frame)
-            elif widget_type == "spinbox_float":
-                widget = ttk.Spinbox(editor_frame, from_=0.0, to=2.0, increment=0.1, format="%.1f", width=10)
-                widget.set(default)
-            elif widget_type == "spinbox_int":
-                widget = ttk.Spinbox(editor_frame, from_=0, to=8192, width=10)
-                widget.set(default)
+            # Special handling for the 'tools' parameter
+            if key == "tools":
+                tools_frame = ttk.Frame(editor_frame)
+                widget = Text(tools_frame, height=5, width=30)
+                widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                select_button = ttk.Button(tools_frame, text="Select...", command=lambda w=widget: self.open_select_tools_window(w))
+                select_button.pack(side=tk.LEFT, padx=(5, 0), anchor='n')
+                tools_frame.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+                editor_frame.columnconfigure(1, weight=1) # Ensure the frame expands
+            else:
+                if widget_type == "text":
+                    widget = Text(editor_frame, height=3, width=30)
+                elif widget_type == "entry":
+                    widget = ttk.Entry(editor_frame)
+                elif widget_type == "spinbox_float":
+                    widget = ttk.Spinbox(editor_frame, from_=0.0, to=2.0, increment=0.1, format="%.1f", width=10)
+                    widget.set(default)
+                elif widget_type == "spinbox_int":
+                    widget = ttk.Spinbox(editor_frame, from_=0, to=8192, width=10)
+                    widget.set(default)
 
-            widget.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+                # `widget` is guaranteed to be defined here for the else branch
+                widget.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+
             self.profile_entries[key] = widget
             row_counter += 1
 
@@ -838,6 +940,9 @@ class DesktopUtilitiesApp:
         delete_button.pack()
 
         self.update_llm_profiles_ui()
+
+    def open_select_tools_window(self, tools_text_widget):
+        SelectToolsWindow(self, tools_text_widget)
 
     def get_model_parameters(self, model_name):
         """Get supported parameters for a specific model"""
@@ -901,13 +1006,23 @@ class DesktopUtilitiesApp:
             else: # Entry or Spinbox
                 value = widget.get().strip()
 
-            if value or isinstance(value, bool): # Store if not empty or is a boolean
+            if not value and not isinstance(value, bool): # Skip empty values, but not boolean False
+                continue
+
+            # Process and store the value
+            if key == 'tools' and isinstance(value, str):
                 try:
-                    if isinstance(widget, ttk.Spinbox):
-                        value = float(value) if "." in str(widget.cget('format')) else int(value)
-                    settings[key] = value
-                except (ValueError, TypeError):
-                    if value: settings[key] = value
+                    settings[key] = json.loads(value)
+                except json.JSONDecodeError:
+                    messagebox.showerror("JSON Error", "Invalid JSON format in the 'Tools' field.", parent=self.root)
+                    return
+            elif isinstance(widget, ttk.Spinbox):
+                try:
+                    settings[key] = float(value) if "." in str(widget.cget('format')) else int(value)
+                except ValueError:
+                    settings[key] = value # Fallback to string if conversion fails
+            else:
+                settings[key] = value
 
         self.llm_profiles[profile_name] = settings
         self.update_llm_profiles_ui()
@@ -929,6 +1044,131 @@ class DesktopUtilitiesApp:
         self.profiles_tree.delete(*self.profiles_tree.get_children())
         for name in sorted(self.llm_profiles.keys()):
             self.profiles_tree.insert('', tk.END, values=(name,))
+
+    def create_tools_tab(self, parent):
+        main_frame = ttk.Frame(parent, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.columnconfigure(1, weight=1)
+
+        # Editor frame for creating/editing tools
+        editor_frame = ttk.LabelFrame(main_frame, text="Create/Edit Tool", padding="10")
+        editor_frame.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
+        editor_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(editor_frame, text="Tool Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.tool_name_entry = ttk.Entry(editor_frame)
+        self.tool_name_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(editor_frame, text="Description:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.tool_description_entry = ttk.Entry(editor_frame)
+        self.tool_description_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(editor_frame, text="Parameters (JSON):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.tool_params_text = Text(editor_frame, height=10, width=40)
+        self.tool_params_text.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+
+        save_button = ttk.Button(editor_frame, text="Save Tool", command=self.save_tool)
+        save_button.grid(row=3, column=1, pady=10, sticky="e")
+
+        # List frame for displaying saved tools
+        list_frame = ttk.LabelFrame(main_frame, text="Saved Tools", padding="10")
+        list_frame.grid(row=0, column=1, sticky="nsew")
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        self.tools_tree = ttk.Treeview(list_frame, columns=('name', 'description'), show='headings')
+        self.tools_tree.heading('name', text='Tool Name')
+        self.tools_tree.heading('description', text='Description')
+        self.tools_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        self.tools_tree.bind('<<TreeviewSelect>>', self.load_tool_for_editing)
+
+        delete_button = ttk.Button(list_frame, text="Delete Selected", command=self.delete_tool)
+        delete_button.pack()
+
+        self.update_tools_ui()
+
+    def update_tools_ui(self):
+        self.tools_tree.delete(*self.tools_tree.get_children())
+        for i, tool in enumerate(self.tools):
+            func = tool.get('function', {})
+            self.tools_tree.insert('', tk.END, iid=i, values=(func.get('name', ''), func.get('description', '')))
+
+    def save_tool(self):
+        name = self.tool_name_entry.get().strip()
+        description = self.tool_description_entry.get().strip()
+        params_str = self.tool_params_text.get("1.0", tk.END).strip()
+
+        if not name:
+            messagebox.showwarning("Input Error", "Tool Name is required.", parent=self.root)
+            return
+
+        try:
+            params = json.loads(params_str) if params_str else {}
+        except json.JSONDecodeError:
+            messagebox.showerror("JSON Error", "Invalid JSON in Parameters field.", parent=self.root)
+            return
+
+        # Find tool by function name
+        tool_to_update = None
+        for t in self.tools:
+            if t.get('function', {}).get('name') == name:
+                tool_to_update = t
+                break
+
+        if tool_to_update:
+            if messagebox.askyesno("Confirm Overwrite", f"A tool named '{name}' already exists. Do you want to overwrite it?"):
+                tool_to_update['function']['description'] = description
+                tool_to_update['function']['parameters'] = params
+            else:
+                return # User cancelled overwrite
+        else:
+            # Add new tool
+            new_tool = {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": params
+                }
+            }
+            self.tools.append(new_tool)
+
+        self.update_tools_ui()
+        # Clear fields
+        self.tool_name_entry.delete(0, tk.END)
+        self.tool_description_entry.delete(0, tk.END)
+        self.tool_params_text.delete("1.0", tk.END)
+        messagebox.showinfo("Success", f"Tool '{name}' saved successfully.", parent=self.root)
+
+    def delete_tool(self):
+        selected_item = self.tools_tree.focus()
+        if not selected_item:
+            messagebox.showwarning("Selection Error", "Please select a tool to delete.", parent=self.root)
+            return
+
+        if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete the selected tool?"):
+            item_index = int(selected_item)
+            del self.tools[item_index]
+            self.update_tools_ui()
+
+    def load_tool_for_editing(self, event=None):
+        selected_item = self.tools_tree.focus()
+        if not selected_item:
+            return
+
+        item_index = int(selected_item)
+        tool = self.tools[item_index]
+        function_def = tool.get('function', {})
+
+        self.tool_name_entry.delete(0, tk.END)
+        self.tool_name_entry.insert(0, function_def.get('name', ''))
+
+        self.tool_description_entry.delete(0, tk.END)
+        self.tool_description_entry.insert(0, function_def.get('description', ''))
+
+        self.tool_params_text.delete("1.0", tk.END)
+        params_json = json.dumps(function_def.get('parameters', {}), indent=4)
+        self.tool_params_text.insert("1.0", params_json)
 
     def load_profile_for_editing(self, event=None):
         selected_item = self.profiles_tree.focus()
