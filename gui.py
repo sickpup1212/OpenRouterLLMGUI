@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, Toplevel, Text, filedialog
+from tkinter import ttk, messagebox, simpledialog, Text, filedialog
 import threading
 import time
 import json
@@ -8,13 +8,12 @@ import re
 import requests
 import base64
 import shutil
-from io import BytesIO
 from pynput import keyboard
 from datetime import datetime
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, List, Union, Literal, Any
-from enum import Enum
-
+from models import OpenRouterAPIParameters
+from ui_windows import SelectProfileWindow, LLMQueryWindow, UseFileWindow, SelectToolsWindow
+from config import load_config, save_config
+from api import fetch_openrouter_models
 
 # --- Important Notes ---
 # This application now requires the 'Pillow' library for image processing.
@@ -33,495 +32,6 @@ except ImportError:
     messagebox.showerror("Missing Dependency", "Pillow library not found. Please run 'pip install Pillow'")
     exit()
 
-
-class VerbosityLevel(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
-class ReasoningLevel(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
-class ResponseFormat(BaseModel):
-    type: Literal["json_object"]
-
-
-class ToolFunction(BaseModel):
-    name: str
-
-
-class ToolChoice(BaseModel):
-    type: Literal["function"]
-    function: ToolFunction
-
-
-class OpenRouterAPIParameters(BaseModel):
-    """
-    Pydantic model for OpenRouter API parameters.
-    This model includes all the sampling parameters that can be used
-    to configure OpenRouter API requests for language model generation.
-    """
-    temperature: Optional[float] = Field(
-        default=1.0,
-        ge=0.0,
-        le=2.0,
-        description="Controls variety in responses. Lower = more predictable, higher = more diverse"
-    )
-    top_p: Optional[float] = Field(
-        default=1.0,
-        ge=0.0,
-        le=1.0,
-        description="Nucleus sampling - limits model choices to top tokens with cumulative probability P"
-    )
-    top_k: Optional[int] = Field(
-        default=0,
-        ge=0,
-        description="Limits model choice to top K tokens at each step. 0 = disabled"
-    )
-    frequency_penalty: Optional[float] = Field(
-        default=0.0,
-        ge=-2.0,
-        le=2.0,
-        description="Reduces repetition based on token frequency in input"
-    )
-    presence_penalty: Optional[float] = Field(
-        default=0.0,
-        ge=-2.0,
-        le=2.0,
-        description="Reduces repetition of tokens already used in input"
-    )
-    repetition_penalty: Optional[float] = Field(
-        default=1.0,
-        ge=0.0,
-        le=2.0,
-        description="Reduces repetition from input. Higher = less repetition"
-    )
-    min_p: Optional[float] = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Minimum probability for token consideration, relative to most likely token"
-    )
-    top_a: Optional[float] = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Dynamic filtering based on probability of most likely token"
-    )
-    seed: Optional[int] = Field(
-        default=None,
-        description="Seed for deterministic sampling"
-    )
-    max_tokens: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Maximum number of tokens to generate"
-    )
-    logit_bias: Optional[Dict[str, float]] = Field(
-        default=None,
-        description="Map of token IDs to bias values (-100 to 100)"
-    )
-    logprobs: Optional[bool] = Field(
-        default=None,
-        description="Whether to return log probabilities of output tokens"
-    )
-    top_logprobs: Optional[int] = Field(
-        default=None,
-        ge=0,
-        le=20,
-        description="Number of most likely tokens to return with log probabilities"
-    )
-    response_format: Optional[ResponseFormat] = Field(
-        default=None,
-        description="Forces specific output format, e.g., JSON mode"
-    )
-    structured_outputs: Optional[bool] = Field(
-        default=None,
-        description="Whether model can return structured outputs using response_format json_schema"
-    )
-    stop: Optional[List[str]] = Field(
-        default=None,
-        description="Array of tokens that will stop generation"
-    )
-    tools: Optional[List[Dict[str, Any]]] = Field(
-        default=None,
-        description="Tool calling parameter following OpenAI's tool calling format"
-    )
-    tool_choice: Optional[Union[str, ToolChoice]] = Field(
-        default=None,
-        description="Controls which tool is called: 'none', 'auto', 'required', or specific tool"
-    )
-    parallel_tool_calls: Optional[bool] = Field(
-        default=True,
-        description="Whether to enable parallel function calling during tool use"
-    )
-    verbosity: Optional[VerbosityLevel] = Field(
-        default=VerbosityLevel.MEDIUM,
-        description="Controls verbosity and length of model response"
-    )
-    reasoning: Optional[ReasoningLevel] = Field(
-        default=None,
-        description="Controls the reasoning level of model response"
-    )
-
-
-class SelectProfileWindow(Toplevel):
-    """A window to select a saved LLM configuration profile."""
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Select Configuration Profile")
-        self.transient(parent)
-        self.geometry("400x300")
-        self.parent = parent
-        self.app = parent.app
-        self.profiles = self.app.llm_profiles
-
-        self.create_widgets()
-
-    def create_widgets(self):
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(main_frame, text="Select a profile to apply:").pack(anchor="w", pady=(0, 5))
-
-        list_frame = ttk.Frame(main_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.profile_listbox = tk.Listbox(list_frame)
-        self.profile_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        for name in self.profiles.keys():
-            self.profile_listbox.insert(tk.END, name)
-
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.profile_listbox.yview)
-        self.profile_listbox.config(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-
-        ttk.Button(button_frame, text="Apply", command=self.apply_selection).pack(side=tk.RIGHT)
-        ttk.Button(button_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=5)
-
-    def apply_selection(self):
-        selected_indices = self.profile_listbox.curselection()
-        if not selected_indices:
-            messagebox.showwarning("No Selection", "Please select a profile.", parent=self)
-            return
-
-        profile_name = self.profile_listbox.get(selected_indices[0])
-        profile_data = self.profiles.get(profile_name)
-
-        if profile_data:
-            self.parent.apply_profile(profile_data, profile_name)
-            self.destroy()
-        else:
-            messagebox.showerror("Error", f"Could not find profile '{profile_name}'.", parent=self)
-
-
-class LLMQueryWindow(Toplevel):
-    """A separate window for querying a specific LLM configuration."""
-    def __init__(self, app, config_name, config_details, initial_prompt=None, initial_response=None):
-        super().__init__(app.root)
-        self.title(f"Query: {config_name}")
-        self.geometry("900x700")
-        self.config_name = config_name
-        self.config_details = config_details
-        self.app = app
-        self.advanced_settings = {}
-        self.current_profile_name = "Default"
-        self.uploaded_image_data = None
-        self.generated_image = None
-        self.history = [] # For conversation history
-
-        self.create_widgets(initial_prompt, initial_response)
-        self.create_context_menus()
-        self.update_title()
-
-    def create_widgets(self, initial_prompt, initial_response):
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        main_frame.rowconfigure(1, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-
-        top_bar = ttk.Frame(main_frame)
-        top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-
-        ttk.Button(top_bar, text="New Conversation", command=self.start_new_conversation).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(top_bar, text="Load Profile", command=self.open_select_profile_window).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top_bar, text="Upload Image", command=self.upload_image).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top_bar, text="Use File", command=self.use_file).pack(side=tk.LEFT, padx=5)
-
-        save_menu_button = ttk.Menubutton(top_bar, text="Save")
-        save_menu = tk.Menu(save_menu_button, tearoff=0)
-        save_menu.add_command(label="Save Last Prompt", command=self.save_prompt)
-        save_menu.add_command(label="Save Last Response", command=self.save_response)
-        save_menu.add_command(label="Save Full History", command=self.save_both)
-        save_menu_button['menu'] = save_menu
-        save_menu_button.pack(side=tk.LEFT, padx=5)
-
-        chat_frame = ttk.Frame(main_frame)
-        chat_frame.grid(row=1, column=0, sticky="nsew")
-        chat_frame.rowconfigure(0, weight=1)
-        chat_frame.columnconfigure(0, weight=1)
-
-        self.chat_display = Text(chat_frame, wrap=tk.WORD, state=tk.DISABLED, font=("Arial", 11))
-        self.chat_display.grid(row=0, column=0, sticky="nsew")
-        chat_scrollbar = ttk.Scrollbar(chat_frame, orient=tk.VERTICAL, command=self.chat_display.yview)
-        chat_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.chat_display['yscrollcommand'] = chat_scrollbar.set
-
-        input_frame = ttk.Frame(main_frame)
-        input_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0))
-        input_frame.columnconfigure(0, weight=1)
-
-        self.prompt_entry = Text(input_frame, height=3, font=("Arial", 10))
-        self.prompt_entry.grid(row=0, column=0, sticky="ew")
-        self.prompt_entry.bind("<Return>", self.send_on_enter)
-        self.prompt_entry.bind("<Shift-Return>", self.insert_newline)
-
-        ttk.Button(input_frame, text="Send", command=self.send_query_threaded).grid(row=0, column=1, padx=(5, 0))
-
-        self.prompt_entry.focus_set()
-
-        if initial_prompt: self.prompt_entry.insert("1.0", initial_prompt)
-        if initial_response:
-            self.history.append({"role": "assistant", "content": initial_response})
-            self.update_chat_display()
-
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def send_on_enter(self, event=None):
-        self.send_query_threaded()
-        return "break"
-
-    def insert_newline(self, event=None):
-        self.prompt_entry.insert(tk.INSERT, "\n")
-        return "break"
-
-    def start_new_conversation(self):
-        self.history = []
-        self.clear_uploaded_image()
-        self.update_chat_display()
-        self.prompt_entry.delete("1.0", tk.END)
-        self.append_to_chat_display("--- New conversation started ---\n", "system")
-
-    def save_prompt(self):
-        last_user_prompt = next((item['content'] for item in reversed(self.history) if item['role'] == 'user'), None)
-        if not last_user_prompt:
-            messagebox.showwarning("Save Error", "No prompt found in history.", parent=self)
-            return
-        self.app.add_saved_item("Prompt", self.config_details['model'], last_user_prompt, "")
-        messagebox.showinfo("Success", "Last prompt saved.", parent=self)
-
-    def save_response(self):
-        last_assistant_response = next((item['content'] for item in reversed(self.history) if item['role'] == 'assistant'), None)
-        if not last_assistant_response:
-            messagebox.showwarning("Save Error", "No response found in history.", parent=self)
-            return
-        self.app.add_saved_item("Response", self.config_details['model'], "", last_assistant_response)
-        messagebox.showinfo("Success", "Last response saved.", parent=self)
-
-    def save_both(self):
-        full_history_text = self.chat_display.get("1.0", tk.END).strip()
-        if not full_history_text:
-            messagebox.showwarning("Save Error", "History is empty.", parent=self)
-            return
-        self.app.add_saved_item("History", self.config_details['model'], full_history_text, "")
-        messagebox.showinfo("Success", "Full conversation history saved.", parent=self)
-
-    def upload_image(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.webp *.gif")])
-        if not file_path: return
-        try:
-            with open(file_path, "rb") as image_file:
-                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-            mime_type = f"image/{file_path.split('.')[-1]}"
-            self.uploaded_image_data = f"data:{mime_type};base64,{encoded_string}"
-            self.append_to_chat_display(f"[Image Uploaded: {os.path.basename(file_path)}]\n", "system")
-        except Exception as e:
-            messagebox.showerror("Image Error", f"Failed to load image: {e}")
-            self.clear_uploaded_image()
-
-    def use_file(self):
-        UseFileWindow(self)
-
-    def add_file_context_to_chat(self, file_info):
-        try:
-            with open(file_info['path'], 'r', encoding='utf-8') as f:
-                content = f.read()
-            context_text = f"--- Using File: {file_info['filename']} ---\n\n{content}\n\n--- End of File ---"
-            self.history.append({"role": "user", "content": context_text})
-            self.update_chat_display()
-        except Exception as e:
-            messagebox.showerror("File Read Error", f"Could not read file: {e}", parent=self)
-
-    def clear_uploaded_image(self):
-        self.uploaded_image_data = None
-
-    def create_context_menus(self):
-        self.context_menu = tk.Menu(self, tearoff=0)
-        self.context_menu.add_command(label="Copy", command=lambda: self.focus_get().event_generate("<<Copy>>"))
-        self.context_menu.add_command(label="Paste", command=lambda: self.prompt_entry.event_generate("<<Paste>>"))
-        self.chat_display.bind("<Button-3>", self.show_context_menu)
-        self.prompt_entry.bind("<Button-3>", self.show_context_menu)
-
-    def show_context_menu(self, event):
-        self.context_menu.tk_popup(event.x_root, event.y_root)
-
-    def open_select_profile_window(self):
-        SelectProfileWindow(self)
-
-    def apply_profile(self, profile_data, profile_name):
-        self.advanced_settings = profile_data.copy()
-        self.current_profile_name = profile_name
-        self.update_title()
-        self.append_to_chat_display(f"--- Applied settings profile: {profile_name} ---\n", "system")
-
-    def update_title(self):
-        self.title(f"Query: {self.config_name} (Profile: {self.current_profile_name})")
-
-    def on_close(self):
-        self.app.unregister_query_window(self.config_name)
-        self.destroy()
-
-    def send_query_threaded(self, event=None):
-        prompt = self.prompt_entry.get("1.0", tk.END).strip()
-        if not prompt and not self.uploaded_image_data and not self.history:
-            return
-
-        self.prompt_entry.delete("1.0", tk.END)
-
-        if prompt or self.uploaded_image_data:
-            user_content_for_history = []
-            if prompt: user_content_for_history.append({"type": "text", "text": prompt})
-            if self.uploaded_image_data: user_content_for_history.append({"type": "image_url", "image_url": {"url": self.uploaded_image_data}})
-            self.history.append({"role": "user", "content": user_content_for_history})
-
-        self.update_chat_display()
-        self.clear_uploaded_image()
-
-        thread = threading.Thread(target=self.call_openrouter_api, daemon=True)
-        thread.start()
-
-    def call_openrouter_api(self):
-        api_key = self.config_details.get("api_key")
-        model_name = self.config_details.get("model")
-        if not api_key:
-            self.append_to_chat_display("Error: OpenRouter API Key is missing.", "error")
-            return
-
-        api_url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
-
-        messages = self.history.copy()
-        if self.advanced_settings.get("system_message"):
-            messages.insert(0, {"role": "system", "content": self.advanced_settings["system_message"]})
-
-        payload = {"model": model_name, "messages": messages}
-
-        # Use Pydantic model to structure and validate parameters
-        try:
-            params = OpenRouterAPIParameters(**self.advanced_settings)
-            payload.update(params.model_dump(exclude_none=True))
-        except Exception as e:
-            self.append_to_chat_display(f"Parameter Validation Error: {e}", "error")
-            return
-
-        try:
-            response = requests.post(api_url, headers=headers, json=payload, timeout=180)
-            response.raise_for_status()
-            result = response.json()
-            text_response = result['choices'][0]['message']['content']
-            self.history.append({"role": "assistant", "content": text_response})
-            self.update_chat_display()
-        except requests.exceptions.RequestException as e:
-            self.append_to_chat_display(f"API Request Failed: {e}", "error")
-        except Exception as e:
-            self.append_to_chat_display(f"An unexpected error occurred: {e}\n\nFull Response:\n{getattr(e, 'response', '')}", "error")
-
-    def update_chat_display(self):
-        self.chat_display.config(state=tk.NORMAL)
-        self.chat_display.delete("1.0", tk.END)
-        for item in self.history:
-            role = item['role']
-            content = item['content']
-            if role == 'user':
-                self.append_to_chat_display("You: ", "user_role")
-                if isinstance(content, list):
-                    for part in content:
-                        if part['type'] == 'text': self.append_to_chat_display(f"{part['text']}\n")
-                        elif part['type'] == 'image_url': self.append_to_chat_display("[Image]\n", "system")
-                else: self.append_to_chat_display(f"{content}\n")
-            elif role == 'assistant':
-                self.append_to_chat_display("Assistant: ", "assistant_role")
-                self.append_to_chat_display(f"{content}\n\n")
-        self.chat_display.config(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-    def append_to_chat_display(self, text, tag=None):
-        self.chat_display.config(state=tk.NORMAL)
-        self.chat_display.tag_configure("user_role", font=("Arial", 11, "bold"))
-        self.chat_display.tag_configure("assistant_role", font=("Arial", 11, "bold"), foreground="blue")
-        self.chat_display.tag_configure("system", font=("Arial", 9, "italic"), foreground="gray")
-        self.chat_display.tag_configure("error", font=("Arial", 10, "italic"), foreground="red")
-        self.chat_display.insert(tk.END, text, tag)
-        self.chat_display.config(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-
-class UseFileWindow(Toplevel):
-    """Window to select a saved file to use in a chat."""
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Use a Saved File")
-        self.transient(parent)
-        self.geometry("600x400")
-        self.parent = parent
-        self.app = parent.app
-
-        self.create_widgets()
-
-    def create_widgets(self):
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        tree_frame = ttk.Frame(main_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        columns = ('filename', 'type', 'date_added')
-        self.files_tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
-        self.files_tree.heading('filename', text='Filename')
-        self.files_tree.heading('type', text='Type')
-        self.files_tree.heading('date_added', text='Date Added')
-        self.files_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.files_tree.yview)
-        self.files_tree.configure(yscroll=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        for i, item in enumerate(self.app.files):
-            self.files_tree.insert('', tk.END, iid=i, values=(item['filename'], item['type'], item['date_added']))
-
-        use_button = ttk.Button(main_frame, text="Use Selected File", command=self.use_selected)
-        use_button.pack()
-
-    def use_selected(self):
-        selected_iid = self.files_tree.focus()
-        if not selected_iid:
-            messagebox.showwarning("Selection Error", "Please select a file to use.", parent=self)
-            return
-
-        item_index = int(selected_iid)
-        file_info = self.app.files[item_index]
-        self.parent.add_file_context_to_chat(file_info)
-        self.destroy()
-
-
 class DesktopUtilitiesApp:
     CONFIG_FILE = "config.json"
     FILES_DIR = "saved_files"
@@ -536,6 +46,7 @@ class DesktopUtilitiesApp:
         self.llm_profiles = {}
         self.saved_items = []
         self.files = []
+        self.tools = []
         self.open_query_windows = {}
         self.openrouter_models = []
         self.models_data = []
@@ -555,22 +66,18 @@ class DesktopUtilitiesApp:
             os.makedirs(self.FILES_DIR)
 
     def load_data(self):
-        if os.path.exists(self.CONFIG_FILE):
-            try:
-                with open(self.CONFIG_FILE, 'r') as f:
-                    data = json.load(f)
-                    shortcuts_data = data.get("shortcuts", {})
-                    for trigger, details in shortcuts_data.items():
-                        self.shortcuts[trigger] = {
-                            "output": details["output"],
-                            "enabled": tk.BooleanVar(value=details.get("enabled", True))
-                        }
-                    self.llm_configs = data.get("llm_configs", {})
-                    self.llm_profiles = data.get("llm_profiles", {})
-                    self.saved_items = data.get("saved_items", [])
-                    self.files = data.get("files", [])
-            except json.JSONDecodeError:
-                messagebox.showerror("Config Error", "Failed to load config.json. It might be corrupted.")
+        data = load_config(self.CONFIG_FILE)
+        shortcuts_data = data.get("shortcuts", {})
+        for trigger, details in shortcuts_data.items():
+            self.shortcuts[trigger] = {
+                "output": details["output"],
+                "enabled": tk.BooleanVar(value=details.get("enabled", True))
+            }
+        self.llm_configs = data.get("llm_configs", {})
+        self.llm_profiles = data.get("llm_profiles", {})
+        self.saved_items = data.get("saved_items", [])
+        self.files = data.get("files", [])
+        self.tools = data.get("tools", [])
 
     def save_data(self):
         shortcuts_to_save = {
@@ -582,10 +89,10 @@ class DesktopUtilitiesApp:
             "llm_configs": self.llm_configs,
             "llm_profiles": self.llm_profiles,
             "saved_items": self.saved_items,
-            "files": self.files
+            "files": self.files,
+            "tools": self.tools
         }
-        with open(self.CONFIG_FILE, 'w') as f:
-            json.dump(data, f, indent=4)
+        save_config(self.CONFIG_FILE, data)
 
     def on_closing(self):
         self.save_data()
@@ -598,18 +105,21 @@ class DesktopUtilitiesApp:
         shortcut_tab = ttk.Frame(notebook)
         llm_tab = ttk.Frame(notebook)
         profiles_tab = ttk.Frame(notebook)
+        tools_tab = ttk.Frame(notebook)
         saved_items_tab = ttk.Frame(notebook)
         files_tab = ttk.Frame(notebook)
 
         notebook.add(shortcut_tab, text='Text Shortcuts')
         notebook.add(llm_tab, text='LLM Models')
         notebook.add(profiles_tab, text='LLM Profiles')
+        notebook.add(tools_tab, text='Tools')
         notebook.add(saved_items_tab, text='Saved Items')
         notebook.add(files_tab, text='Files')
 
         self.create_shortcut_tab(shortcut_tab)
         self.create_llm_tab(llm_tab)
         self.create_config_profiles_tab(profiles_tab)
+        self.create_tools_tab(tools_tab)
         self.create_saved_items_tab(saved_items_tab)
         self.create_files_tab(files_tab)
 
@@ -688,23 +198,21 @@ class DesktopUtilitiesApp:
         thread.start()
 
     def fetch_openrouter_models(self):
-        try:
-            response = requests.get("https://openrouter.ai/api/v1/models")
-            response.raise_for_status()
-            self.models_data = response.json()['data']
-            self.openrouter_models = sorted([model['id'] for model in self.models_data])
-
-            def update_ui():
-                self.llm_model_combo['values'] = self.openrouter_models
-                self.llm_model_combo.set("Select a model")
-                if hasattr(self, 'profile_model_combo'):
-                    self.profile_model_combo['values'] = self.openrouter_models
-                    self.profile_model_combo.set("Select a model to see parameters")
-
-            self.root.after(0, update_ui)
-        except requests.exceptions.RequestException as e:
-            self.root.after(0, lambda: messagebox.showerror("API Error", f"Failed to fetch models from OpenRouter: {e}"))
+        self.models_data = fetch_openrouter_models()
+        if not self.models_data:
             self.root.after(0, lambda: self.llm_model_combo.set("Failed to fetch models"))
+            return
+
+        self.openrouter_models = sorted([model['id'] for model in self.models_data])
+
+        def update_ui():
+            self.llm_model_combo['values'] = self.openrouter_models
+            self.llm_model_combo.set("Select a model")
+            if hasattr(self, 'profile_model_combo'):
+                self.profile_model_combo['values'] = self.openrouter_models
+                self.profile_model_combo.set("Select a model to see parameters")
+
+        self.root.after(0, update_ui)
 
     def add_llm_config(self):
         name = self.llm_name_entry.get()
@@ -781,7 +289,7 @@ class DesktopUtilitiesApp:
             ("Structured Outputs", "structured_outputs", "", "entry"),
             ("Stop Sequences", "stop", "", "entry"),
             ("Reasoning", "reasoning", "", "entry"),
-            ("Verbosity", "verbosity", 0, "spinbox_int"),
+            ("Verbosity", "verbosity", ["low", "medium", "high"], "combobox"),
         ]
 
         self.profile_entries = {}
@@ -789,22 +297,34 @@ class DesktopUtilitiesApp:
         for label, key, default, widget_type in fields:
             ttk.Label(editor_frame, text=f"{label}:").grid(row=row_counter, column=0, padx=5, pady=2, sticky="w")
 
-            if widget_type == "text":
-                widget = Text(editor_frame, height=3, width=30)
-            elif widget_type == "entry":
-                widget = ttk.Entry(editor_frame)
-            elif widget_type == "spinbox_float":
-                widget = ttk.Spinbox(editor_frame, from_=0.0, to=2.0, increment=0.1, format="%.1f", width=10)
-                widget.set(default)
-            elif widget_type == "spinbox_int":
-                widget = ttk.Spinbox(editor_frame, from_=0, to=8192, width=10)
-                widget.set(default)
+            if key == "tools":
+                tools_frame = ttk.Frame(editor_frame)
+                widget = Text(tools_frame, height=5, width=30)
+                widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                select_button = ttk.Button(tools_frame, text="Select...", command=lambda w=widget: self.open_select_tools_window(w))
+                select_button.pack(side=tk.LEFT, padx=(5, 0), anchor='n')
+                tools_frame.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+                editor_frame.columnconfigure(1, weight=1)
+            else:
+                if widget_type == "text":
+                    widget = Text(editor_frame, height=3, width=30)
+                elif widget_type == "entry":
+                    widget = ttk.Entry(editor_frame)
+                elif widget_type == "spinbox_float":
+                    widget = ttk.Spinbox(editor_frame, from_=0.0, to=2.0, increment=0.1, format="%.1f", width=10)
+                    widget.set(default)
+                elif widget_type == "spinbox_int":
+                    widget = ttk.Spinbox(editor_frame, from_=0, to=8192, width=10)
+                    widget.set(default)
+                elif widget_type == "combobox":
+                    widget = ttk.Combobox(editor_frame, values=default, state="readonly")
+                    widget.set(default[1])
 
-            widget.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+                widget.grid(row=row_counter, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+
             self.profile_entries[key] = widget
             row_counter += 1
 
-        # --- Checkbuttons for boolean parameters ---
         bool_fields = [
             ("Logprobs", "logprobs"),
             ("Parallel Tool Calls", "parallel_tool_calls"),
@@ -815,10 +335,9 @@ class DesktopUtilitiesApp:
             var = tk.BooleanVar()
             chk = ttk.Checkbutton(editor_frame, text=label, variable=var)
             chk.grid(row=row_counter, column=0, columnspan=3, padx=5, pady=2, sticky="w")
-            self.profile_entries[key] = var # Store the variable
+            self.profile_entries[key] = var
             row_counter += 1
             
-        # Initially disable all fields
         self.toggle_profile_fields(False)
 
         save_button = ttk.Button(editor_frame, text="Save Profile", command=self.add_llm_profile)
@@ -839,8 +358,10 @@ class DesktopUtilitiesApp:
 
         self.update_llm_profiles_ui()
 
+    def open_select_tools_window(self, tools_text_widget):
+        SelectToolsWindow(self, tools_text_widget)
+
     def get_model_parameters(self, model_name):
-        """Get supported parameters for a specific model"""
         for model in self.models_data:
             if model['id'] == model_name:
                 return model.get('supported_parameters')
@@ -863,10 +384,7 @@ class DesktopUtilitiesApp:
         for key, widget in self.profile_entries.items():
             if enable:
                 if supported_params is None or key in supported_params:
-                    if isinstance(widget, tk.BooleanVar):
-                        # Checkbuttons don't have a state property in the same way
-                        pass
-                    else:
+                    if not isinstance(widget, tk.BooleanVar):
                         widget.config(state=tk.NORMAL)
                 else:
                     if not isinstance(widget, tk.BooleanVar):
@@ -890,24 +408,33 @@ class DesktopUtilitiesApp:
 
         settings = {"model": model_name}
         for key, widget in self.profile_entries.items():
-            # Only save enabled fields
             if not isinstance(widget, tk.BooleanVar) and widget.cget('state') == tk.DISABLED:
                 continue
 
+            value = None
             if isinstance(widget, tk.BooleanVar):
                 value = widget.get()
             elif isinstance(widget, Text):
                 value = widget.get("1.0", tk.END).strip()
-            else: # Entry or Spinbox
+            else:
                 value = widget.get().strip()
 
-            if value or isinstance(value, bool): # Store if not empty or is a boolean
+            if not value and not isinstance(value, bool):
+                continue
+
+            if key == 'tools' and isinstance(value, str):
                 try:
-                    if isinstance(widget, ttk.Spinbox):
-                        value = float(value) if "." in str(widget.cget('format')) else int(value)
+                    settings[key] = json.loads(value)
+                except json.JSONDecodeError:
+                    messagebox.showerror("JSON Error", "Invalid JSON format in the 'Tools' field.", parent=self.root)
+                    return
+            elif isinstance(widget, ttk.Spinbox):
+                try:
+                    settings[key] = float(value) if "." in str(widget.cget('format')) else int(value)
+                except ValueError:
                     settings[key] = value
-                except (ValueError, TypeError):
-                    if value: settings[key] = value
+            else:
+                settings[key] = value
 
         self.llm_profiles[profile_name] = settings
         self.update_llm_profiles_ui()
@@ -945,7 +472,6 @@ class DesktopUtilitiesApp:
             self.profile_model_combo.set("Select a model to see parameters")
             self.toggle_profile_fields(False)
 
-
         self.profile_name_entry.delete(0, tk.END)
         self.profile_name_entry.insert(0, profile_name)
 
@@ -955,12 +481,135 @@ class DesktopUtilitiesApp:
                 widget.set(bool(value))
             elif isinstance(widget, Text):
                 widget.delete("1.0", tk.END)
-                widget.insert("1.0", str(value))
-            elif isinstance(widget, ttk.Entry):
+                if key == 'tools' and isinstance(value, list):
+                    widget.insert("1.0", json.dumps(value, indent=4))
+                else:
+                    widget.insert("1.0", str(value))
+            elif isinstance(widget, (ttk.Entry, ttk.Combobox)):
                 widget.delete(0, tk.END)
                 widget.insert(0, str(value))
-            else: # Spinbox
+            elif isinstance(widget, ttk.Spinbox):
                 widget.set(str(value) if value else "0")
+
+    def create_tools_tab(self, parent):
+        main_frame = ttk.Frame(parent, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.columnconfigure(1, weight=1)
+
+        editor_frame = ttk.LabelFrame(main_frame, text="Create/Edit Tool", padding="10")
+        editor_frame.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
+        editor_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(editor_frame, text="Tool Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.tool_name_entry = ttk.Entry(editor_frame)
+        self.tool_name_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(editor_frame, text="Description:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.tool_description_entry = ttk.Entry(editor_frame)
+        self.tool_description_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(editor_frame, text="Parameters (JSON):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.tool_params_text = Text(editor_frame, height=10, width=40)
+        self.tool_params_text.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+
+        save_button = ttk.Button(editor_frame, text="Save Tool", command=self.save_tool)
+        save_button.grid(row=3, column=1, pady=10, sticky="e")
+
+        list_frame = ttk.LabelFrame(main_frame, text="Saved Tools", padding="10")
+        list_frame.grid(row=0, column=1, sticky="nsew")
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        self.tools_tree = ttk.Treeview(list_frame, columns=('name', 'description'), show='headings')
+        self.tools_tree.heading('name', text='Tool Name')
+        self.tools_tree.heading('description', text='Description')
+        self.tools_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        self.tools_tree.bind('<<TreeviewSelect>>', self.load_tool_for_editing)
+
+        delete_button = ttk.Button(list_frame, text="Delete Selected", command=self.delete_tool)
+        delete_button.pack()
+
+        self.update_tools_ui()
+
+    def update_tools_ui(self):
+        self.tools_tree.delete(*self.tools_tree.get_children())
+        for i, tool in enumerate(self.tools):
+            func = tool.get('function', {})
+            self.tools_tree.insert('', tk.END, iid=i, values=(func.get('name', ''), func.get('description', '')))
+
+    def save_tool(self):
+        name = self.tool_name_entry.get().strip()
+        description = self.tool_description_entry.get().strip()
+        params_str = self.tool_params_text.get("1.0", tk.END).strip()
+
+        if not name:
+            messagebox.showwarning("Input Error", "Tool Name is required.", parent=self.root)
+            return
+
+        try:
+            params = json.loads(params_str) if params_str else {}
+        except json.JSONDecodeError:
+            messagebox.showerror("JSON Error", "Invalid JSON in Parameters field.", parent=self.root)
+            return
+
+        tool_to_update = None
+        for t in self.tools:
+            if t.get('function', {}).get('name') == name:
+                tool_to_update = t
+                break
+
+        if tool_to_update:
+            if messagebox.askyesno("Confirm Overwrite", f"A tool named '{name}' already exists. Do you want to overwrite it?"):
+                tool_to_update['function']['description'] = description
+                tool_to_update['function']['parameters'] = params
+            else:
+                return
+        else:
+            new_tool = {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": params
+                }
+            }
+            self.tools.append(new_tool)
+
+        self.update_tools_ui()
+        self.tool_name_entry.delete(0, tk.END)
+        self.tool_description_entry.delete(0, tk.END)
+        self.tool_params_text.delete("1.0", tk.END)
+        messagebox.showinfo("Success", f"Tool '{name}' saved successfully.", parent=self.root)
+
+    def delete_tool(self):
+        selected_item = self.tools_tree.focus()
+        if not selected_item:
+            messagebox.showwarning("Selection Error", "Please select a tool to delete.", parent=self.root)
+            return
+
+        if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete the selected tool?"):
+            item_index = int(selected_item)
+            del self.tools[item_index]
+            self.update_tools_ui()
+
+    def load_tool_for_editing(self, event=None):
+        selected_item = self.tools_tree.focus()
+        if not selected_item:
+            return
+
+        item_index = int(selected_item)
+        tool = self.tools[item_index]
+        function_def = tool.get('function', {})
+
+        self.tool_name_entry.delete(0, tk.END)
+        self.tool_name_entry.insert(0, function_def.get('name', ''))
+
+        self.tool_description_entry.delete(0, tk.END)
+        self.tool_description_entry.insert(0, function_def.get('description', ''))
+
+        self.tool_params_text.delete("1.0", tk.END)
+        params_json = json.dumps(function_def.get('parameters', {}), indent=4)
+        self.tool_params_text.insert("1.0", params_json)
 
     def create_saved_items_tab(self, parent):
         main_frame = ttk.Frame(parent, padding="10")
