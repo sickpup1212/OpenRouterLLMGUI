@@ -1,0 +1,16 @@
+config.json
+my_nypost_links.txt
+README_REFACTOR.md
+REFACTORING_GUIDE.md
+core/**
+components/**
+articles/**
+__pycache__/**
+thoughts/**
+!thoughts/.gitkeep
+agents/**
+!agents/example-agent.md
+saved_files/**
+!saved_files/.gitkeep
+**/__pycache__
+
