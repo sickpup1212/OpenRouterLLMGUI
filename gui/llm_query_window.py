@@ -8,6 +8,8 @@ import os
 import base64
 import logging
 import requests
+import re
+import html
 
 from gui.markdown_renderer import MarkdownRenderer
 from gui.diff_viewer import DiffViewerWindow
@@ -131,6 +133,67 @@ class LLMQueryWindow(Toplevel):
         except Exception as e:
             return f"<p>Error formatting todo HTML: {e}</p>"
     # --- END NEW HELPER FUNCTION ---
+    def _escape_html(self, text: str) -> str:
+        """A basic HTML escaper."""
+        return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+    def _process_html_for_code_blocks(self, html_content: str, code_block_counter: int) -> (str, int):
+        """Finds code blocks, adds copy buttons, and stores their content."""
+        pattern = re.compile(r'(<pre><code.*?>.*?</code></pre>)', re.DOTALL)
+
+        last_end = 0
+        processed_html = []
+        for match in pattern.finditer(html_content):
+            processed_html.append(html_content[last_end:match.start()])
+
+            block_html = match.group(1)
+            block_id = f"block-{code_block_counter}"
+            code_block_counter += 1
+
+            raw_code = re.sub('<[^<]+?>', '', block_html)
+            self.code_blocks[block_id] = html.unescape(raw_code)
+
+            container = (
+                f'<div class="code-block-container">'
+                f'<a href="copy-code://{block_id}" class="copy-code-btn">Copy</a>'
+                f'{block_html}'
+                f'</div>'
+            )
+            processed_html.append(container)
+            last_end = match.end()
+
+        processed_html.append(html_content[last_end:])
+        return "".join(processed_html), code_block_counter
+
+    def _copy_code_to_clipboard(self, block_id: str):
+        """Copy the code from a specific block to the clipboard."""
+        code_content = self.code_blocks.get(block_id)
+        if code_content:
+            try:
+                # Use the tkinter clipboard functionality
+                self.clipboard_clear()
+                self.clipboard_append(code_content)
+                self.update()  # Required on some platforms
+                logger.info(f"Copied code block {block_id} to clipboard.")
+                # We can't give direct feedback on the button, this is a limitation
+            except tk.TclError:
+                logger.error("Failed to copy to clipboard. Tkinter clipboard not available.")
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during copy: {e}")
+
+    def _handle_link_click(self, url: str):
+        """Callback to handle clicks on special links in the HtmlFrame."""
+        if url.startswith("copy-code://"):
+            block_id = url.split("copy-code://")[1]
+            self._copy_code_to_clipboard(block_id)
+        # Add handling for other custom schemes or standard http links if needed
+        elif url.startswith("http"):
+            try:
+                import webbrowser
+                webbrowser.open_new(url)
+            except Exception as e:
+                logger.error(f"Failed to open URL '{url}': {e}")
+
 
     def safe_enable_send_button(self):
         """Safely enable send button, checking if window still exists."""
@@ -260,7 +323,13 @@ class LLMQueryWindow(Toplevel):
         # Use HtmlFrame for rendered HTML
         try:
             from tkinterweb import HtmlFrame
-            self.chat_display = HtmlFrame(chat_frame, messages_enabled=False)
+            # Create a dictionary to hold the content of code blocks for copying
+            self.code_blocks = {}
+            self.chat_display = HtmlFrame(
+                chat_frame,
+                messages_enabled=False,
+                link_clicked_callback=self._handle_link_click
+            )
             self.chat_display.grid(row=0, column=0, sticky="nsew")
             self.using_html = True
         except ImportError:
@@ -678,6 +747,30 @@ class LLMQueryWindow(Toplevel):
                     line-height: 1.6;
                     margin: 0;
                 }
+                .code-block-container {
+                    position: relative;
+                    margin: 10px 0;
+                }
+                .copy-code-btn {
+                    position: absolute;
+                    top: 8px;
+                    right: 8px;
+                    background-color: #e0e0e0;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-size: 0.8em;
+                    cursor: pointer;
+                    display: none;
+                    text-decoration: none;
+                    color: black;
+                }
+                .code-block-container:hover .copy-code-btn {
+                    display: block;
+                }
+                .copy-code-btn:hover {
+                    background-color: #d0d0d0;
+                }
                 .user-message {
                     margin: 10px 0;
                     padding: 10px;
@@ -759,6 +852,9 @@ class LLMQueryWindow(Toplevel):
             </head>
             <body>
             """)
+            # Reset the code blocks dictionary for this render
+            self.code_blocks = {}
+            code_block_counter = 0
 
             for item in self.history:
                 role = item.get('role')
@@ -780,20 +876,31 @@ class LLMQueryWindow(Toplevel):
                 elif role == 'user':
                     html_parts.append('<div class="user-message">')
                     html_parts.append('<div class="user-role">You:</div>')
-
+                    user_content = ""
                     if isinstance(content, list):
                         for part in content:
                             if part['type'] == 'text':
-                                escaped_text = part['text'].replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-                                html_parts.append(f'<div>{escaped_text}</div>')
-                            elif part['type'] == 'image_url':
-                                html_parts.append('<div class="system-message">[Image]</div>')
+                                user_content += part['text']
                     else:
-                        escaped_text = str(content).replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-                        html_parts.append(f'<div>{escaped_text}</div>')
+                        user_content = str(content)
+
+                    # Convert markdown in user messages to HTML
+                    try:
+                        from markdown import markdown
+                        # Use a simpler markdown conversion for user messages
+                        html_content = markdown(
+                            user_content,
+                            extensions=['fenced_code', 'codehilite', 'nl2br']
+                        )
+                        processed_html, code_block_counter = self._process_html_for_code_blocks(
+                            html_content, code_block_counter
+                        )
+                        html_parts.append(processed_html)
+
+                    except ImportError:
+                        html_parts.append(f'<div>{self._escape_html(user_content).replace(chr(10), "<br>")}</div>')
 
                     html_parts.append('</div>')
-
                 elif role == 'assistant':
                     if content:
                         html_parts.append('<div class="assistant-message">')
@@ -811,9 +918,13 @@ class LLMQueryWindow(Toplevel):
                                     'sane_lists'
                                 ]
                             )
-                            html_parts.append(html_content)
+                            processed_html, code_block_counter = self._process_html_for_code_blocks(
+                                html_content, code_block_counter
+                            )
+                            html_parts.append(processed_html)
+
                         except ImportError:
-                            escaped = content.replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+                            escaped = self._escape_html(content).replace('\n', '<br>')
                             html_parts.append(escaped)
 
                         html_parts.append('</div>')
